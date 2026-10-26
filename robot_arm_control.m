@@ -1,16 +1,30 @@
-function robot_arm_control(role)
+function robot_arm_control(role, inputDeviceID, outputDeviceID)
 %ROBOT_ARM_CONTROL Open a 3-D master or slave GUI for the simulated robot arm.
 %   robot_arm_control("master") opens the pose and gyro controls.
 %   robot_arm_control("slave") receives the modem through the default audio input.
+%   robot_arm_control("slave", inputID) selects an audio input device.
+%   robot_arm_control("master", [], outputID) selects an audio output device.
 %   Run a second MATLAB process for the other endpoint.
 
 if nargin < 1 || isempty(role)
     role = "master";
 end
+if nargin < 2
+    inputDeviceID = [];
+end
+if nargin < 3
+    outputDeviceID = [];
+end
 role = lower(string(role));
 if ~any(role == ["master", "slave"])
     error('robot_arm_control:InvalidRole', 'Role must be "master" or "slave".');
 end
+
+audioDevices = audiodevinfo;
+validateAudioDevice(inputDeviceID, audioDevices.input, ...
+    'robot_arm_control:InvalidInputDevice', 'input');
+validateAudioDevice(outputDeviceID, audioDevices.output, ...
+    'robot_arm_control:InvalidOutputDevice', 'output');
 
 angles = [90, 90, 90, 45];
 gyro = [0, 0, 0];
@@ -40,7 +54,8 @@ controls.ColumnWidth = {120, '1x'};
 
 if role == "master"
     uilabel(controls, 'Text', 'Audio output', 'HorizontalAlignment', 'right');
-    outputLabel = uilabel(controls, 'Text', 'Default device');
+    outputLabel = uilabel(controls, 'Text', ...
+        audioDeviceLabel(outputDeviceID, audioDevices.output));
     outputLabel.Layout.Column = 2;
 
     labels = {'Base (deg)', 'Shoulder (deg)', 'Elbow (deg)', 'Gripper (deg)'};
@@ -68,14 +83,17 @@ if role == "master"
         'WordWrap', 'on');
     status.Layout.Row = 9;
     status.Layout.Column = [1, 2];
-    lastSentState = [angles, gyro];
+    lastSentState = [];
+    initialTransmissionsRemaining = 3;
     sessionId = randi([0, 65535]);
     transmitTimer = timer('ExecutionMode', 'fixedSpacing', ...
-        'Period', config.WaveformSamples/config.SampleRate, ...
+        'Period', config.WaveformSamples/config.SampleRate + 0.25, ...
+        'StartDelay', 1, ...
         'BusyMode', 'drop', 'TimerFcn', @sendPoseIfChanged);
 else
     uilabel(controls, 'Text', 'Audio input', 'HorizontalAlignment', 'right');
-    inputLabel = uilabel(controls, 'Text', 'Default device');
+    inputLabel = uilabel(controls, 'Text', ...
+        audioDeviceLabel(inputDeviceID, audioDevices.input));
     inputLabel.Layout.Column = 2;
     labels = {'Base (deg)', 'Shoulder (deg)', 'Elbow (deg)', 'Gripper (deg)'};
     angleLabels = gobjects(1, 4);
@@ -95,12 +113,16 @@ else
         gyroReadouts(k).Layout.Row = row;
         gyroReadouts(k).Layout.Column = 2;
     end
-    status = uilabel(controls, 'Text', 'Waiting for HFM-synchronized frames...', ...
+    status = uilabel(controls, 'Text', 'Waiting for HFM synchronization...', ...
         'WordWrap', 'on');
     status.Layout.Row = 9;
     status.Layout.Column = [1, 2];
-    ring = ByteRingBuffer(131072);
-    recorder = audiorecorder(config.SampleRate, 16, 1);
+    ring = SampleRingBuffer(6*config.SampleRate);
+    if isempty(inputDeviceID)
+        recorder = audiorecorder(config.SampleRate, 16, 1);
+    else
+        recorder = audiorecorder(config.SampleRate, 16, 1, inputDeviceID);
+    end
     lastAudioIndex = 0;
     record(recorder);
     audioTimer = timer('ExecutionMode', 'fixedSpacing', 'Period', 0.05, ...
@@ -137,6 +159,7 @@ drawArm();
 if role == "slave"
     start(audioTimer);
 else
+    status.Text = 'Starting acoustic link; sending initial pose...';
     start(transmitTimer);
 end
 
@@ -154,7 +177,7 @@ end
             return;
         end
         state = [angles, round(gyro*100)/100];
-        if isequal(state, lastSentState)
+        if isequal(state, lastSentState) && initialTransmissionsRemaining == 0
             return;
         end
 
@@ -165,6 +188,7 @@ end
             sequence, num2str(angles), num2str(gyro, '%.2f '));
         lastSentState = state;
         sequence = mod(sequence + 1, 65536);
+        initialTransmissionsRemaining = max(0, initialTransmissionsRemaining - 1);
         startNextTransmission();
     end
 
@@ -174,7 +198,11 @@ end
         end
         waveform = pendingWaveform;
         pendingWaveform = [];
-        player = audioplayer(waveform, config.SampleRate, 16);
+        if isempty(outputDeviceID)
+            player = audioplayer(waveform, config.SampleRate, 16);
+        else
+            player = audioplayer(waveform, config.SampleRate, 16, outputDeviceID);
+        end
         player.StopFcn = @finishTransmission;
         status.Text = 'Transmitting acoustic waveform...';
         play(player);
@@ -189,13 +217,33 @@ end
         end
     end
 
+    function validateAudioDevice(deviceID, devices, errorID, direction)
+    if isempty(deviceID)
+        return;
+    end
+    validateattributes(deviceID, {'numeric'}, ...
+        {'scalar', 'finite', 'integer', 'nonnegative'});
+    if ~any([devices.ID] == deviceID)
+        error(errorID, 'Audio %s device ID %d is not available.', ...
+            direction, deviceID);
+    end
+    end
+
+    function label = audioDeviceLabel(deviceID, devices)
+    if isempty(deviceID)
+        label = 'System default device';
+        return;
+    end
+    deviceIndex = find([devices.ID] == deviceID, 1);
+    label = sprintf('ID %d: %s', deviceID, devices(deviceIndex).Name);
+    end
+
     function appendAudioSamples(audio)
         if numel(audio) <= lastAudioIndex
             return;
         end
         newSamples = audio(lastAudioIndex + 1:end);
-        pcm = uint8(round((min(1, max(-1, newSamples)) + 1)*127.5));
-        ring.push(pcm);
+        ring.push(newSamples);
         lastAudioIndex = numel(audio);
     end
 
@@ -203,30 +251,45 @@ end
         audio = getaudiodata(recorder);
         appendAudioSamples(audio);
 
-        if lastAudioIndex >= 2*config.SampleRate
+        if lastAudioIndex >= config.CaptureRestartSamples
             stop(recorder);
             appendAudioSamples(getaudiodata(recorder));
-            recorder = audiorecorder(config.SampleRate, 16, 1);
+            if isempty(inputDeviceID)
+                recorder = audiorecorder(config.SampleRate, 16, 1);
+            else
+                recorder = audiorecorder(config.SampleRate, 16, 1, inputDeviceID);
+            end
             lastAudioIndex = 0;
             record(recorder);
         end
 
-        while ring.Count >= config.WaveformSamples
-            waveform = double(ring.peek(ring.Count))/127.5 - 1;
+        while ring.Count >= config.MinimumDecodeSamples
+            waveform = double(ring.peek(ring.Count));
             [frame, valid, reason, confidence, syncStart] = ...
                 robot_waveform_decode(waveform);
             if ~valid
                 if strcmp(reason, 'HFM synchronization not found')
-                    ring.discard(max(1, ring.Count - config.WaveformSamples + 1));
+                    status.Text = 'Searching for HFM synchronization...';
+                    if ring.Count >= config.WaveformSamples
+                        ring.discard(min(config.SamplesPerBit*128, ...
+                            ring.Count - config.WaveformSamples + 1));
+                    end
+                    break;
+                elseif strcmp(reason, 'Incomplete FSK payload')
+                    ring.discard(syncStart - 1);
+                    status.Text = 'Receiving HFM-synchronized FSK payload...';
+                    break;
                 else
-                    ring.discard(config.WaveformSamples);
+                    discardCount = min(ring.Count, ...
+                        syncStart - 1 + config.MinimumDecodeSamples);
+                    ring.discard(discardCount);
+                    status.Text = ['Rejected waveform: ', reason];
                 end
-                status.Text = ['Rejected waveform: ', reason];
                 continue;
             end
 
             [decoded, packetValid, corrected, reason] = robot_packet_decode(frame);
-            ring.discard(syncStart - 1 + config.WaveformSamples);
+            ring.discard(syncStart - 1 + config.MinimumDecodeSamples);
             if ~packetValid
                 status.Text = ['Rejected packet: ', reason];
                 continue;
@@ -255,10 +318,10 @@ end
                 decoded.sequence, confidence, corrected);
         end
 
-        if ring.DroppedBytes > lastReportedDrops
+        if ring.DroppedSamples > lastReportedDrops
             status.Text = sprintf('Sample ring overflow: dropped %d sample(s).', ...
-                ring.DroppedBytes);
-            lastReportedDrops = ring.DroppedBytes;
+                ring.DroppedSamples);
+            lastReportedDrops = ring.DroppedSamples;
         end
     end
 

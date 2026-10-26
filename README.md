@@ -1,7 +1,7 @@
 # Master-slave robot arm demo (MATLAB)
 
 This project simulates a 4-servo arm and optional 3-axis gyroscope over an
-acoustic HFM/FSK link. The master and slave each have one GUI; run them in
+acoustic FSK link. The master and slave each have one GUI; run them in
 separate MATLAB sessions or on separate computers.
 
 ## Run
@@ -12,19 +12,30 @@ In the receiving MATLAB session, connected to the hydrophone/audio input:
 robot_arm_control("slave")
 ```
 
-In the transmitting MATLAB session, connected to the underwater speaker/audio
-output:
+Start the slave first. Then, in the transmitting MATLAB session connected to
+the underwater speaker/audio output, run:
 
 ```matlab
 robot_arm_control("master")
 ```
 
+To select a specific MATLAB audio device instead of Windows' default, inspect
+`audiodevinfo`, then pass the input ID to the slave or the output ID to the
+master:
+
+```matlab
+robot_arm_control("slave", inputDeviceID)
+robot_arm_control("master", [], outputDeviceID)
+```
+
 Drag a servo slider with the mouse to move the master arm in the 3-D view.
-While a servo or gyro value is changing, the master checks for a new pose once
-per waveform interval (about 0.334 seconds) and transmits the latest changed
+While a servo or gyro value is changing, the master checks for a new pose about
+once every 0.9 seconds and transmits the latest changed
 state. When all values stop changing, transmission stops; an unchanged pose is
-not resent. MATLAB uses the operating system's default audio output and input
-devices.
+not resent. After a one-second startup delay, the master sends its initial pose
+three times to give the receiver and audio devices time to settle and improve
+link acquisition reliability. When no device IDs are supplied, MATLAB uses the
+operating system's default audio input and output devices.
 
 ## Fixed frame and modem
 
@@ -41,26 +52,29 @@ The protected frame is always 38 bytes:
 | CRC-16/CCITT | 2 |
 | SECDED Hamming encoding for the 17 bytes above | 34 |
 
-The waveform layer adds a 25 ms Hyperbolic FM (HFM) synchronization preamble,
-a short guard interval, then 1000 bit/s binary FSK at 48 kHz. The slave
-correlates against HFM, demodulates FSK, corrects single-bit errors with
-SECDED, checks CRC, and updates its 3-D view only for a new sequence number.
-Incoming waveform samples are buffered in a circular ring buffer.
+Each waveform starts with a 25 ms hyperbolic FM (HFM) chirp sweeping from
+14.5 to 19.5 kHz, followed by a 5 ms guard, the protected packet using
+17.0/17.8 kHz binary FSK at 500 bit/s, and a 5 ms trailing guard. The receiver correlates against the HFM chirp to locate the frame, refines
+symbol timing to tolerate independent audio-clock rates, then demodulates FSK,
+corrects single-bit errors with SECDED, checks CRC, and updates its 3-D view
+only for a new sequence number. Audio samples are retained at their recorded
+precision in a circular ring buffer.
 
 The master plays the modulated waveform using MATLAB audio output. The slave
-continuously records from the default audio input, stores quantized samples in
-a circular ring buffer, and updates its 3-D arm when a valid frame is decoded.
-This is a real acoustic audio path, not a UDP or network transport. For an
+continuously records from the default audio input and updates its 3-D arm when
+a valid frame is decoded. Recording is restarted every 30 seconds to bound
+recorder memory use; the selected input device is preserved across restarts,
+though a short capture gap can occur. This is a real acoustic audio path, not
+a UDP or network transport. For an
 underwater link, connect a suitable underwater projector/transducer to the
-output chain and a hydrophone/pre-amplifier to the input chain. The specified
-14.5–19.5 kHz passband and 48 kHz audio sampling rate must be supported by the
+output chain and a hydrophone/pre-amplifier to the input chain. The 17.0–17.8
+kHz carrier band and 48 kHz audio sampling rate must be supported by the
 sound interfaces and transducers. Use appropriately rated, waterproof
 equipment; ordinary speakers and microphones are not underwater transducers.
 
 Servo sliders and gyro fields are still simulated inputs. The slave rotates
 the displayed arm; the program does not yet drive physical servos or sample a
-physical gyro. Audio capture is periodically restarted to bound MATLAB's
-recorder memory use, so a small capture gap can occur at each restart.
+physical gyro.
 
 ## Tests
 

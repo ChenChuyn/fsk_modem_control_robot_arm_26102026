@@ -85,7 +85,11 @@ overallParity = mod(sum(code), 2);
 ok = true;
 corrected = false;
 
-if syndrome ~= 0 && overallParity == 1
+if syndrome > 12
+    ok = false;
+    value = uint8(0);
+    return;
+elseif syndrome ~= 0 && overallParity == 1
     code(syndrome) = 1 - code(syndrome);
     corrected = true;
 elseif syndrome == 0 && overallParity == 1
